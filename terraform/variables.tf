@@ -118,6 +118,12 @@ variable "task_memory" {
   default     = 512
 }
 
+
+variable "alarm_sns_topic_arn" {
+  description = "Alarm ARN"
+  type        = string
+}
+
 variable "deployment_minimum_healthy_percent" {
   description = "Minimum percentage of tasks that must remain healthy during a deployment"
   type        = number

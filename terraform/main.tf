@@ -28,14 +28,14 @@ data "aws_ami" "ecs_optimized" {
   }
 }
 
-data "aws_ssm_parameter" "secrets" {
-  # Iterate only over provided secret ARNs to build an ARN list for IAM
-  for_each = var.ssm_secret_arns
-  name     = each.value  # value is the full ARN; SSM data source accepts ARNs
-  # We only reference this for ARN extraction — the VALUE never touches TF state
-  # because we use `secrets` block in the task definition (fetched at container start)
-  with_decryption = false
-}
+# data "aws_ssm_parameter" "secrets" {
+#   # Iterate only over provided secret ARNs to build an ARN list for IAM
+#   for_each = var.ssm_secret_arns
+#   name     = each.value  # value is the full ARN; SSM data source accepts ARNs
+#   # We only reference this for ARN extraction — the VALUE never touches TF state
+#   # because we use `secrets` block in the task definition (fetched at container start)
+#   with_decryption = false
+# }
 
 # ═══════════════════════════════════════════════════════════════
 # IAM — EC2 Instance Role (ECS Agent)
@@ -594,80 +594,24 @@ resource "aws_appautoscaling_target" "ecs" {
   service_namespace  = "ecs"
 }
 
-resource "aws_appautoscaling_policy" "scale_out" {
-  name               = "${var.project_name}-scale-out"
-  policy_type        = "StepScaling"
+resource "aws_appautoscaling_policy" "scale" {
+  name               = "${var.project_name}-scale"
+  policy_type        = "TargetTrackingScaling"
   resource_id        = aws_appautoscaling_target.ecs.resource_id
   scalable_dimension = aws_appautoscaling_target.ecs.scalable_dimension
   service_namespace  = aws_appautoscaling_target.ecs.service_namespace
 
-  step_scaling_policy_configuration {
-    adjustment_type         = "ChangeInCapacity"
-    cooldown                = 60
-    metric_aggregation_type = "Average"
+  target_tracking_scaling_policy_configuration {
+    target_value = 60
 
-    step_adjustment {
-      metric_interval_lower_bound = 0
-      scaling_adjustment          = 2
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
     }
+
+    scale_in_cooldown  = 300  # Wait 5 minutes before scaling in
+    scale_out_cooldown = 60   # Wait 1 minute before scaling out
   }
-}
-
-resource "aws_appautoscaling_policy" "scale_in" {
-  name               = "${var.project_name}-scale-in"
-  policy_type        = "StepScaling"
-  resource_id        = aws_appautoscaling_target.ecs.resource_id
-  scalable_dimension = aws_appautoscaling_target.ecs.scalable_dimension
-  service_namespace  = aws_appautoscaling_target.ecs.service_namespace
-
-  step_scaling_policy_configuration {
-    adjustment_type         = "ChangeInCapacity"
-    cooldown                = 300  # Longer cooldown for scale-in to avoid flapping
-    metric_aggregation_type = "Average"
-
-    step_adjustment {
-      metric_interval_upper_bound = 0
-      scaling_adjustment          = -1
-    }
-  }
-}
-
-resource "aws_cloudwatch_metric_alarm" "cpu_high" {
-  alarm_name          = "${var.project_name}-cpu-high"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 2
-  metric_name         = "CPUUtilization"
-  namespace           = "AWS/ECS"
-  period              = 60
-  statistic           = "Average"
-  threshold           = var.scale_out_cpu_threshold
-  alarm_description   = "ECS service CPU above ${var.scale_out_cpu_threshold}% — scaling out"
-
-  dimensions = {
-    ClusterName = aws_ecs_cluster.main.name
-    ServiceName = aws_ecs_service.app.name
-  }
-
-  alarm_actions = [aws_appautoscaling_policy.scale_out.arn]
-}
-
-resource "aws_cloudwatch_metric_alarm" "cpu_low" {
-  alarm_name          = "${var.project_name}-cpu-low"
-  comparison_operator = "LessThanThreshold"
-  evaluation_periods  = 5   # More periods before scale-in (conservative)
-  metric_name         = "CPUUtilization"
-  namespace           = "AWS/ECS"
-  period              = 60
-  statistic           = "Average"
-  threshold           = var.scale_in_cpu_threshold
-  alarm_description   = "ECS service CPU below ${var.scale_in_cpu_threshold}% — scaling in"
-
-  dimensions = {
-    ClusterName = aws_ecs_cluster.main.name
-    ServiceName = aws_ecs_service.app.name
-  }
-
-  alarm_actions = [aws_appautoscaling_policy.scale_in.arn]
+  
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -685,7 +629,8 @@ resource "aws_cloudwatch_metric_alarm" "alb_5xx_high" {
   threshold           = 50
   treat_missing_data  = "notBreaching"
   alarm_description   = "ALB 5xx error rate elevated — check ECS tasks and application logs"
-
+  alarm_actions       = [var.alarm_sns_topic_arn]
+  
   dimensions = {
     LoadBalancer = aws_lb.main.arn_suffix
   }
@@ -702,6 +647,7 @@ resource "aws_cloudwatch_metric_alarm" "unhealthy_host_count" {
   threshold           = 0
   treat_missing_data  = "notBreaching"
   alarm_description   = "One or more ALB targets are unhealthy — check ECS service events"
+  alarm_actions       = [var.alarm_sns_topic_arn]
 
   dimensions = {
     LoadBalancer = aws_lb.main.arn_suffix
@@ -719,6 +665,7 @@ resource "aws_cloudwatch_metric_alarm" "running_task_count_low" {
   statistic           = "Average"
   threshold           = var.autoscaling_min_capacity
   alarm_description   = "Running task count below minimum — possible capacity exhaustion"
+  alarm_actions       = [var.alarm_sns_topic_arn]
 
   dimensions = {
     ClusterName = aws_ecs_cluster.main.name
